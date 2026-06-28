@@ -107,12 +107,13 @@ function createPluginRecord(
   const summary = extractSummary(readme)
   const categories = extractCategories(readme)
   const author = extractAuthor(readme, imageMap)
+  const bodyMarkdown = extractBodyMarkdown(readme)
 
   return {
     id: folder,
     name,
     folder,
-    readme: renderMarkdown(readme, imageMap),
+    readme: renderMarkdown(bodyMarkdown, imageMap),
     cover: findCoverImage(readme, imageMap),
     imageCount: Object.keys(imageMap).length,
     summary,
@@ -169,6 +170,43 @@ function extractTitle(readme: string) {
   return line?.replace(/^#\s+/, '').trim()
 }
 
+function extractBodyMarkdown(readme: string) {
+  const lines = readme.split(/\r?\n/)
+  const titleIndex = lines.findIndex((item) => /^#\s+/.test(item))
+
+  if (titleIndex < 0) {
+    return readme
+  }
+
+  let startIndex = titleIndex + 1
+  while (startIndex < lines.length && !lines[startIndex].trim()) {
+    startIndex += 1
+  }
+
+  const bodyLines = lines.slice(startIndex)
+  const filteredLines: string[] = []
+  let skippingAuthorSection = false
+
+  for (const line of bodyLines) {
+    if (/^##\s+作者信息\s*$/.test(line.trim())) {
+      skippingAuthorSection = true
+      continue
+    }
+
+    if (skippingAuthorSection) {
+      if (/^#{1,6}\s+/.test(line.trim())) {
+        skippingAuthorSection = false
+        filteredLines.push(line)
+      }
+      continue
+    }
+
+    filteredLines.push(line)
+  }
+
+  return filteredLines.join('\n')
+}
+
 function extractSummary(readme: string) {
   const lines = readme.split(/\r?\n/)
   const titleIndex = lines.findIndex((item) => /^#\s+/.test(item))
@@ -195,9 +233,9 @@ function extractCategories(readme: string) {
 }
 
 function extractAuthor(readme: string, imageMap: Record<string, string>): PluginAuthor | null {
-  const avatarMatch = readme.match(/^作者头像[:：]\s*(.+)$/im)
-  const nicknameMatch = readme.match(/^作者昵称[:：]\s*(.+)$/im)
-  const idMatch = readme.match(/^作者ID[:：]\s*(.+)$/im)
+  const avatarMatch = readme.match(/^[-*+]\s*作者头像[:：]\s*(.+)$/im)
+  const nicknameMatch = readme.match(/^[-*+]\s*作者昵称[:：]\s*(.+)$/im)
+  const idMatch = readme.match(/^[-*+]\s*作者ID[:：]\s*(.+)$/im)
 
   if (!avatarMatch && !nicknameMatch && !idMatch) return null
 
@@ -232,6 +270,10 @@ function findCoverImage(readme: string, imageMap: Record<string, string>) {
 function renderMarkdown(readme: string, imageMap: Record<string, string>) {
   const normalized = readme.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_match, alt: string, src: string) => {
     const resolved = imageMap[src] ?? imageMap[`./imgs/${src.replace(/^\.\//, '')}`] ?? src
+    if (alt.trim() === '作者头像') {
+      return `<img class="markdown__author-avatar" src="${resolved}" alt="${escapeHtml(alt)}" />`
+    }
+
     return `<img src="${resolved}" alt="${escapeHtml(alt)}" />`
   })
 
@@ -271,6 +313,10 @@ function renderMarkdown(readme: string, imageMap: Record<string, string>) {
 
     if (inCode) {
       codeBuffer.push(rawLine)
+      continue
+    }
+
+    if (/^>\s?/.test(line)) {
       continue
     }
 
@@ -354,9 +400,29 @@ function escapeHtml(value: string) {
               <p class="hero__description">{{ selectedPlugin.summary }}</p>
             </div>
 
-            <div class="badge-group">
-              <span class="badge">{{ selectedPlugin.imageCount }} 图</span>
-              <span v-for="tag in selectedPlugin.categories" :key="tag" class="tag">{{ tag }}</span>
+            <div class="detail-card__side">
+              <div class="badge-group">
+                <span class="badge">{{ selectedPlugin.imageCount }} 图</span>
+                <span v-for="tag in selectedPlugin.categories" :key="tag" class="tag">{{ tag }}</span>
+              </div>
+
+              <section v-if="selectedPlugin.author" class="author-card author-card--compact">
+                <img
+                  v-if="selectedPlugin.author.avatar"
+                  class="author-card__avatar"
+                  :src="selectedPlugin.author.avatar"
+                  :alt="selectedPlugin.author.nickname"
+                />
+                <div v-else class="author-card__avatar author-card__avatar--placeholder">
+                  {{ selectedPlugin.author.nickname.slice(0, 1) }}
+                </div>
+
+                <div class="author-card__body">
+                  <div class="author-card__label">作者信息</div>
+                  <div class="author-card__name">{{ selectedPlugin.author.nickname }}</div>
+                  <div class="author-card__id">ID: {{ selectedPlugin.author.id }}</div>
+                </div>
+              </section>
             </div>
           </header>
 
@@ -379,24 +445,6 @@ function escapeHtml(value: string) {
               删除插件
             </button>
           </div>
-
-          <section v-if="selectedPlugin.author" class="author-card">
-            <img
-              v-if="selectedPlugin.author.avatar"
-              class="author-card__avatar"
-              :src="selectedPlugin.author.avatar"
-              :alt="selectedPlugin.author.nickname"
-            />
-            <div v-else class="author-card__avatar author-card__avatar--placeholder">
-              {{ selectedPlugin.author.nickname.slice(0, 1) }}
-            </div>
-
-            <div class="author-card__body">
-              <div class="author-card__label">作者信息</div>
-              <div class="author-card__name">{{ selectedPlugin.author.nickname }}</div>
-              <div class="author-card__id">ID: {{ selectedPlugin.author.id }}</div>
-            </div>
-          </section>
 
           <div class="detail-card__content markdown" v-html="selectedPlugin.readme"></div>
         </article>
