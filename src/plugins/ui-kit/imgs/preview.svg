@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <defs>
+    <linearGradient id="p" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#22d3ee"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="720" rx="48" fill="#0f172a"/>
+  <rect x="118" y="118" width="964" height="484" rx="36" fill="#111827" stroke="rgba(255,255,255,0.14)"/>
+  <circle cx="950" cy="210" r="110" fill="url(#p)" opacity="0.95"/>
+  <rect x="172" y="190" width="280" height="120" rx="24" fill="#1f2937"/>
+  <rect x="480" y="190" width="280" height="120" rx="24" fill="#1f2937"/>
+  <rect x="172" y="342" width="588" height="150" rx="24" fill="#1f2937"/>
+  <text x="174" y="282" fill="#fff" font-size="32" font-family="Arial, sans-serif">UI Kit</text>
+  <text x="174" y="414" fill="#cbd5e1" font-size="28" font-family="Arial, sans-serif">组件化展示与主题预览</text>
+</svg>

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#22d3ee"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="720" rx="48" fill="#0f172a"/>
+  <circle cx="210" cy="150" r="90" fill="url(#g)" opacity="0.95"/>
+  <rect x="140" y="290" width="920" height="280" rx="28" fill="#111827" stroke="rgba(255,255,255,0.12)"/>
+  <text x="140" y="250" fill="#fff" font-size="72" font-family="Arial, sans-serif" font-weight="700">Auto Switcher</text>
+  <text x="180" y="372" fill="#cbd5e1" font-size="40" font-family="Arial, sans-serif">快速切换配置、主题与工作流</text>
+  <rect x="180" y="454" width="220" height="66" rx="18" fill="#8b5cf6"/>
+  <rect x="420" y="454" width="220" height="66" rx="18" fill="#1f2937" stroke="#38bdf8"/>
+  <text x="228" y="497" fill="#fff" font-size="28" font-family="Arial, sans-serif">立即使用</text>
+  <text x="476" y="497" fill="#7dd3fc" font-size="28" font-family="Arial, sans-serif">查看配置</text>
+</svg>
