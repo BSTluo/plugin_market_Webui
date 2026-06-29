@@ -106,12 +106,41 @@ const CreateWindow = () => {
     "z-index: 2",
   ].join(";");
 
+  const topbarLeft = document.createElement("div");
+  topbarLeft.style.cssText = [
+    "display: flex",
+    "align-items: center",
+    "gap: 10px",
+    "min-width: 0",
+  ].join(";");
+
+  const reloadButton = document.createElement("button");
+  reloadButton.type = "button";
+  reloadButton.textContent = "⟳";
+  reloadButton.setAttribute("aria-label", "重载网站");
+  reloadButton.title = "重载网站";
+  reloadButton.style.cssText = [
+    "width: 36px",
+    "height: 36px",
+    "border: none",
+    "border-radius: 10px",
+    "background: rgba(255, 255, 255, 0.08)",
+    "color: #ffffff",
+    "font-size: 18px",
+    "font-weight: 700",
+    "cursor: pointer",
+    "display: flex",
+    "align-items: center",
+    "justify-content: center",
+  ].join(";");
+
   const title = document.createElement("div");
   title.textContent = "插件市场";
   title.style.cssText = [
     "font-size: 16px",
     "font-weight: 600",
     "letter-spacing: 0.04em",
+    "white-space: nowrap",
   ].join(";");
 
   const closeButton = document.createElement("button");
@@ -135,7 +164,7 @@ const CreateWindow = () => {
 
   const iframe = document.createElement("iframe");
   iframe.title = "插件市场";
-  iframe.src = new URL("http://localhost:5174/");
+  iframe.src = new URL("http://iiroseMarket.reifuu.icu");
   iframe.style.cssText = [
     "flex: 1 1 auto",
     "width: 100%",
@@ -144,6 +173,10 @@ const CreateWindow = () => {
     "border: none",
     "background: #111827",
   ].join(";");
+
+  const reloadWindow = () => {
+    window.location.reload();
+  };
 
   const closeWindow = () => {
     document.removeEventListener("keydown", onKeyDown);
@@ -158,10 +191,14 @@ const CreateWindow = () => {
     }
   };
 
+  reloadButton.addEventListener("click", reloadWindow);
   closeButton.addEventListener("click", closeWindow);
   document.addEventListener("keydown", onKeyDown);
 
-  topbar.appendChild(title);
+  topbarLeft.appendChild(reloadButton);
+  topbarLeft.appendChild(title);
+
+  topbar.appendChild(topbarLeft);
   topbar.appendChild(closeButton);
   panel.appendChild(topbar);
   panel.appendChild(iframe);
