@@ -12,6 +12,9 @@ export default defineConfig({
       'Access-Control-Allow-Headers': '*',
       'Content-Security-Policy': "frame-ancestors *",
     },
+    allowedHosts: [
+      'iirosemarket.reifuu.icu'
+    ]
   },
   preview: {
     headers: {
