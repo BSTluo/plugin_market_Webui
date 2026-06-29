@@ -164,7 +164,7 @@ const CreateWindow = () => {
 
   const iframe = document.createElement("iframe");
   iframe.title = "插件市场";
-  iframe.src = new URL("https://iiroseMarket.reifuu.icu");
+  iframe.src = new URL("https://iirosemarket.reifuu.icu");
   iframe.style.cssText = [
     "flex: 1 1 auto",
     "width: 100%",
