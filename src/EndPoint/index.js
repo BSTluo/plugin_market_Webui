@@ -17,7 +17,11 @@ const CreateWindow = () => {
 
   const bridgeHandler = (event) => {
     const data = event.data;
-    if (!data || data.source !== "plugin-market" || data.target !== "iirosejs") {
+    if (
+      !data ||
+      data.source !== "plugin-market" ||
+      data.target !== "iirosejs"
+    ) {
       return;
     }
 
@@ -55,7 +59,8 @@ const CreateWindow = () => {
             target: "plugin-market",
             requestId: data.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : "failed to write extJs",
+            error:
+              error instanceof Error ? error.message : "failed to write extJs",
           },
           event.origin,
         );
@@ -206,8 +211,16 @@ const CreateWindow = () => {
   document.body.appendChild(overlay);
 };
 
+const closeMenu = () => {
+  document.querySelector("div#functionHolder").style.display = "none";
+  document.querySelector("div#functionHolderDarker").style.display = "none";
+  document.querySelector("body").style.transform = "";
+};
+
 PluginMarketView.addEventListener("click", () => {
   CreateWindow();
+
+  closeMenu();
 });
 
 const targetElement = document.querySelector(
