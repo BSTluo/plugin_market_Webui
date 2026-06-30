@@ -121,18 +121,19 @@ const CreateWindow = () => {
 
   const reloadButton = document.createElement("button");
   reloadButton.type = "button";
-  reloadButton.textContent = "⟳";
-  reloadButton.setAttribute("aria-label", "重载网站");
-  reloadButton.title = "重载网站";
+  reloadButton.textContent = "重载花园";
+  reloadButton.setAttribute("aria-label", "重载花园");
+  reloadButton.title = "重载花园";
   reloadButton.style.cssText = [
-    "width: 36px",
+    "min-width: 88px",
     "height: 36px",
     "border: none",
     "border-radius: 10px",
     "background: rgba(255, 255, 255, 0.08)",
     "color: #ffffff",
-    "font-size: 18px",
-    "font-weight: 700",
+    "font-size: 14px",
+    "font-weight: 600",
+    "padding: 0 14px",
     "cursor: pointer",
     "display: flex",
     "align-items: center",
