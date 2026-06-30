@@ -1,3 +1,5 @@
+const host = "https://iirosemarket.reifuu.icu";
+
 const PluginMarketView = document.createElement("div");
 const PluginMarketIcon = document.createElement("span");
 PluginMarketIcon.className = "functionBtnIcon mdi-powershell";
@@ -170,7 +172,8 @@ const CreateWindow = () => {
 
   const iframe = document.createElement("iframe");
   iframe.title = "插件市场";
-  iframe.src = new URL("https://iirosemarket.reifuu.icu");
+
+  iframe.src = new URL(host);
   iframe.style.cssText = [
     "flex: 1 1 auto",
     "width: 100%",
