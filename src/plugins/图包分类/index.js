@@ -4,14 +4,36 @@
   if (window.__iiroseEmojiCategoriesInstalled) return;
   window.__iiroseEmojiCategoriesInstalled = true;
 
+  const OFFICIAL_PACKAGE_NAME = 'nocturne.emojiCategories';
+  const OFFICIAL_PACKAGE_INFO = {
+    name: '表情分类插件',
+    author: ['夜的钢琴曲','猹'],
+    privacy: '读取本机自定义表情和插件分类数据，用于分类、导入导出、额外表情去重、用户主动触发的同步，以及按用户输入的 UID 发送分类分享；保存是否允许接收分类分享的设置。',
+    versionName: '1.4.0',
+    versionCode: 1,
+    description: '为 iirose 自定义表情增加分类、筛选、导入导出、跨端同步、指定 UID 分享和表情市场。',
+    outerLoad: '市场功能会请求 https://oss.modest6.cloud/emoji-market/index.json 及其 packs/*.json；不加载外部 JS/CSS/HTML。',
+    icon: '',
+    cover: '',
+    poster: '',
+    device: '*',
+    runAt: 'allReady',
+  };
+  installOfficialPlugin();
+
   const STORAGE_KEY = 'iiroseEmojiCategories';
   const EXTRA_STORAGE_KEY = 'iiroseExtraEmojis';
   const ALL_CATEGORY_ID = 'all';
   const PACK_APP = 'iirose-emoji-categories';
   const PACK_VERSION = 2;
+  const DIRECT_SHARE_TYPE = 'category_share';
+  const DIRECT_SHARE_VERSION = 1;
+  const DIRECT_SHARE_MAX_CHARS = 100000;
+  const DIRECT_SHARE_ALLOW_SETTING_KEY = 'directShareReceiveAllowed';
   const MARKET_APP = 'iirose-emoji-market';
   const MARKET_VERSION = 1;
   const MARKET_INDEX_URL = 'https://oss.modest6.cloud/emoji-market/index.json';
+  const MARKET_FETCH_TIMEOUT_MS = 15000;
   const LONG_PRESS_MS = 520;
   const LONG_PRESS_MOVE_TOLERANCE = 10;
   const FACE_HOLDER_SELECTOR = '#faceHolder';
@@ -26,15 +48,80 @@
   let categoryPickerMenu = null;
   let shareMenu = null;
   let activeDialog = null;
+  let marketPanel = null;
+  let marketLoadSeq = 0;
   let longPressTimer = 0;
   let longPressStart = null;
   let suppressedClick = null;
+  let officialPluginInstance = null;
+  let officialDataReceiverInstalled = false;
 
+  officialPluginInstance = installOfficialPlugin();
+  installOfficialDataReceiver();
   installInSameOriginFrames();
   injectStyle();
   installObservers();
   installEvents();
   scheduleSetup();
+
+  function installOfficialPlugin() {
+    try {
+      if (!window.Ext || !window.Ext.Service || typeof window.Ext.Service.install !== 'function') {
+        return null;
+      }
+
+      return window.Ext.Service.install(OFFICIAL_PACKAGE_NAME, OFFICIAL_PACKAGE_INFO);
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function getOfficialPluginInstance() {
+    if (officialPluginInstance && typeof officialPluginInstance.send === 'function') {
+      return officialPluginInstance;
+    }
+
+    try {
+      if (!window.Ext || !window.Ext.Service) return null;
+
+      if (typeof window.Ext.Service.install === 'function') {
+        officialPluginInstance = window.Ext.Service.install(OFFICIAL_PACKAGE_NAME, OFFICIAL_PACKAGE_INFO);
+      }
+
+      if (!officialPluginInstance && typeof window.Ext.Service.getInstance === 'function') {
+        officialPluginInstance = window.Ext.Service.getInstance(OFFICIAL_PACKAGE_NAME);
+      }
+
+      if (!officialPluginInstance && window.Ext.Service.instances) {
+        officialPluginInstance = window.Ext.Service.instances[OFFICIAL_PACKAGE_NAME] || null;
+      }
+    } catch (error) {
+      officialPluginInstance = null;
+    }
+
+    return officialPluginInstance && typeof officialPluginInstance.send === 'function'
+      ? officialPluginInstance
+      : null;
+  }
+
+  function installOfficialDataReceiver() {
+    const instance = getOfficialPluginInstance();
+    if (!instance || officialDataReceiverInstalled) return;
+
+    const previousOnData = typeof instance.onData === 'function' ? instance.onData : null;
+    instance.onData = function(uid, data) {
+      if (previousOnData) {
+        try {
+          previousOnData.call(instance, uid, data);
+        } catch (error) {
+          // Preserve this plugin receiver even if a previous handler fails.
+        }
+      }
+
+      handleOfficialData(uid, data);
+    };
+    officialDataReceiverInstalled = true;
+  }
 
   function installInSameOriginFrames() {
     const source = '(' + iiroseEmojiCategoriesScript.toString() + ')();';
@@ -62,6 +149,7 @@
 
     const scan = () => {
       document.querySelectorAll('iframe').forEach(install);
+      installOfficialDataReceiver();
       installSyncModule();
     };
 
@@ -273,6 +361,320 @@
       if (toast.parentNode) toast.remove();
     }, 2600);
   }
+
+  function handleOfficialData(uid, data) {
+    if (typeof data !== 'string' || data.length > DIRECT_SHARE_MAX_CHARS) return;
+
+    let message = null;
+    try {
+      message = JSON.parse(data);
+    } catch (error) {
+      return;
+    }
+
+    if (!message || message.app !== OFFICIAL_PACKAGE_NAME) return;
+
+    if (message.type === DIRECT_SHARE_TYPE) {
+      if (!isDirectShareReceiveAllowed()) return;
+      receiveDirectCategoryShare(uid, message);
+    }
+  }
+
+  function receiveDirectCategoryShare(uid, message) {
+    if (Number(message.version) !== DIRECT_SHARE_VERSION) return;
+
+    const categories = extractImportedCategories(message.payload);
+    if (!categories.length) {
+      showSyncToast('收到分类分享，但没有可用分类。', true);
+      return;
+    }
+
+    showDirectShareApplyDialog(uid, categories, message);
+  }
+
+  function showDirectShareApplyDialog(uid, categories, message) {
+    closeDialog();
+
+    const dialog = createDialogShell({
+      title: '收到分类分享',
+      confirmText: '导入',
+    });
+
+    const first = categories[0];
+    const senderLabel = getDirectShareSenderLabel(uid, message);
+    const hint = document.createElement('div');
+    hint.className = 'iirose-emoji-import-hint';
+    hint.textContent = senderLabel + ' 发来 ' + categories.length + ' 个分类。导入会与本地同名分类自动合并。';
+    dialog.content.appendChild(hint);
+
+    const categoryMessage = document.createElement('div');
+    categoryMessage.className = 'iirose-emoji-dialog-message';
+    categoryMessage.textContent = first.name + '（' + first.items.length + ' 个表情）' + (categories.length > 1 ? ' 等' : '');
+    dialog.content.appendChild(categoryMessage);
+
+    dialog.confirmButton.addEventListener('click', () => {
+      const result = applyImportedCategories(categories, 'merge');
+      closeDialog();
+      barSignature = '';
+      renderCategoryBar();
+      applyCategoryFilter();
+      showSyncToast(result.message);
+    });
+  }
+
+  function showDirectSharePickerDialog() {
+    const state = loadState();
+
+    closeItemMenu();
+    closeCategoryMenu();
+    closeCategoryPickerMenu();
+    closeShareMenu();
+
+    const dialog = createDialogShell({
+      title: '发送分类',
+      confirmText: '关闭',
+    });
+
+    if (!state.categories.length) {
+      const empty = document.createElement('div');
+      empty.className = 'iirose-emoji-dialog-message';
+      empty.textContent = '还没有分类可以发送。';
+      dialog.content.appendChild(empty);
+      dialog.confirmButton.addEventListener('click', () => closeDialog());
+      return;
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'iirose-emoji-import-hint';
+    hint.textContent = '选择要发送的分类，然后输入接收方 UID。';
+    dialog.content.appendChild(hint);
+
+    const list = document.createElement('div');
+    list.className = 'iirose-emoji-import-list';
+    state.categories.forEach((category) => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'iirose-emoji-export-row';
+      row.dataset.categoryId = category.id;
+      row.textContent = category.name + '（' + category.items.length + ' 个表情）';
+      list.appendChild(row);
+    });
+    dialog.content.appendChild(list);
+
+    list.addEventListener('click', (event) => {
+      const row = event.target.closest('.iirose-emoji-export-row');
+      if (!row) return;
+      closeDialog();
+      showDirectShareUidDialog(row.dataset.categoryId);
+    });
+
+    dialog.confirmButton.addEventListener('click', () => closeDialog());
+  }
+
+  function showDirectShareUidDialog(categoryId) {
+    const state = loadState();
+    const category = state.categories.find((item) => item.id === categoryId);
+    if (!category) {
+      showSyncToast('分类不存在，无法发送。', true);
+      return;
+    }
+
+    closeDialog();
+
+    const dialog = createDialogShell({
+      title: '发送给 UID',
+      confirmText: '发送',
+    });
+
+    const hint = document.createElement('div');
+    hint.className = 'iirose-emoji-import-hint';
+    hint.textContent = '将“' + category.name + '”（' + category.items.length + ' 个表情）发送给指定 UID。';
+    dialog.content.appendChild(hint);
+
+    const inputWrap = document.createElement('div');
+    inputWrap.className = 'iirose-emoji-dialog-input-wrap';
+
+    const input = document.createElement('input');
+    input.className = 'iirose-emoji-dialog-input';
+    input.type = 'text';
+    input.placeholder = '请输入对方 UID . . .';
+    input.maxLength = 64;
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    inputWrap.appendChild(input);
+    dialog.content.appendChild(inputWrap);
+
+    const submit = () => {
+      const targetUid = normalizeTargetUid(input.value);
+      if (!targetUid) {
+        input.focus();
+        dialog.root.classList.add('iirose-emoji-dialog--shake');
+        window.setTimeout(() => dialog.root.classList.remove('iirose-emoji-dialog--shake'), 220);
+        showSyncToast('UID 只能包含字母和数字。', true);
+        return;
+      }
+
+      if (sendCategoryToUid(category, targetUid)) {
+        closeDialog();
+      }
+    };
+
+    dialog.confirmButton.addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    });
+
+    window.setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  }
+
+  function sendCategoryToUid(category, targetUid) {
+    const instance = getOfficialPluginInstance();
+    if (!instance || typeof instance.send !== 'function') {
+      showSyncToast('官方数据转发接口不可用。', true);
+      return false;
+    }
+
+    installOfficialDataReceiver();
+
+    const payload = buildDirectSharePayload(category);
+    const text = JSON.stringify(payload);
+    if (text.length > DIRECT_SHARE_MAX_CHARS) {
+      showSyncToast('这个分类数据过大，暂时无法直接发送。', true);
+      return false;
+    }
+
+    try {
+      instance.send(targetUid, text);
+    } catch (error) {
+      showSyncToast('发送失败，请检查 UID 或稍后重试。', true);
+      return false;
+    }
+
+    showSyncToast('已发送分类“' + category.name + '”。');
+    return true;
+  }
+
+  function buildDirectSharePayload(category) {
+    return {
+      app: OFFICIAL_PACKAGE_NAME,
+      type: DIRECT_SHARE_TYPE,
+      version: DIRECT_SHARE_VERSION,
+      id: createDirectShareId(),
+      sentAt: new Date().toISOString(),
+      sender: getDirectShareSenderInfo(),
+      payload: buildCategoryPack(category),
+    };
+  }
+
+  function createDirectShareId() {
+    return 'share_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  }
+
+  function normalizeTargetUid(uid) {
+    const value = String(uid || '').trim();
+    return /^[A-Za-z0-9]{1,64}$/.test(value) ? value : '';
+  }
+
+  function isDirectShareReceiveAllowed() {
+    const instance = getOfficialPluginInstance();
+    if (!instance || typeof instance.settings !== 'function') return true;
+
+    try {
+      return instance.settings(DIRECT_SHARE_ALLOW_SETTING_KEY) !== '0';
+    } catch (error) {
+      return true;
+    }
+  }
+
+  function setDirectShareReceiveAllowed(allowed) {
+    const instance = getOfficialPluginInstance();
+    if (!instance || typeof instance.settings !== 'function') return false;
+
+    try {
+      instance.settings(DIRECT_SHARE_ALLOW_SETTING_KEY, allowed ? '1' : '0');
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+
+  function toggleDirectShareReceiveAllowed() {
+    const nextAllowed = !isDirectShareReceiveAllowed();
+    if (!setDirectShareReceiveAllowed(nextAllowed)) {
+      showSyncToast('接收设置保存失败。', true);
+      return;
+    }
+
+    showSyncToast(nextAllowed ? '已允许接收分类分享。' : '已关闭分类分享接收。');
+  }
+
+  function getDirectShareSenderInfo() {
+    const win = getIIROSEWindow() || window;
+    const uid = normalizeTargetUid(win && win.uid);
+    const name = sanitizeDisplayName(resolveDisplayNameByUid(uid));
+    const sender = {};
+    if (uid) sender.uid = uid;
+    if (name) sender.name = name;
+    return sender;
+  }
+
+  function getDirectShareSenderLabel(uid, message) {
+    const uidText = normalizeTargetUid(uid) || String(uid || '未知');
+    const localName = sanitizeDisplayName(resolveDisplayNameByUid(uidText));
+    const payloadName = sanitizeDisplayName(message && message.sender && message.sender.name);
+    const name = localName || payloadName;
+    return name ? name + '（UID: ' + uidText + '）' : 'UID ' + uidText;
+  }
+
+  function resolveDisplayNameByUid(uid) {
+    const value = normalizeTargetUid(uid);
+    if (!value) return '';
+
+    const docs = [document];
+    const win = getIIROSEWindow();
+    try {
+      if (win && win.document && win.document !== document) docs.push(win.document);
+    } catch (error) {
+      // Ignore inaccessible frame documents.
+    }
+
+    for (let index = 0; index < docs.length; index += 1) {
+      const doc = docs[index];
+      const name = findDisplayNameInDocument(doc, value);
+      if (name) return name;
+    }
+
+    return '';
+  }
+
+  function findDisplayNameInDocument(doc, uid) {
+    if (!doc || !doc.querySelector) return '';
+
+    const selectors = [
+      '.mapHolderRoomUserMenuBoxItem[data-uid="' + uid + '"] .mapHolderRoomUserMenuBoxItemInfoName',
+      '[data-uid="' + uid + '"] .followName',
+      '[data-uid="' + uid + '"] .followName2',
+      '[data-uid="' + uid + '"] .cardTagName',
+    ];
+
+    for (let index = 0; index < selectors.length; index += 1) {
+      const node = doc.querySelector(selectors[index]);
+      const name = sanitizeDisplayName(node && node.textContent);
+      if (name) return name;
+    }
+
+    return '';
+  }
+
+  function sanitizeDisplayName(name) {
+    return String(name || '').replace(/\s+/g, ' ').trim().slice(0, 32);
+  }
   // ---------- Sync module end ----------
 
   function installObservers() {
@@ -318,11 +720,8 @@
       return;
     }
 
-    faceHolder.classList.add('iirose-emoji-category-holder');
-    cleanupLegacyTopLevelBar(faceHolder);
     const bar = ensureCategoryBar(emojiPage);
     const active = isCustomEmojiPanelActive();
-    faceHolder.classList.toggle('iirose-emoji-category-active', active);
     bar.hidden = !active;
 
     if (!active) {
@@ -334,23 +733,10 @@
     }
 
     // 不再自动清除分类中本机暂未拥有的表情，保留导入包的完整 URL；
-    // 失效表情的清理改为后续手动操作（pruneCategories 仍保留备用）。
+    // 失效表情的清理改为后续手动操作。
     syncExtraEmojiItems();
     renderCategoryBar();
     applyCategoryFilter();
-  }
-
-  function cleanupLegacyTopLevelBar(faceHolder) {
-    Array.from(faceHolder.children).forEach((child) => {
-      if (child.classList && child.classList.contains('iirose-emoji-category-bar')) {
-        child.remove();
-      }
-    });
-
-    const typeBar = faceHolder.querySelector(':scope > .faceHolderType');
-    if (typeBar && typeBar.nextElementSibling) {
-      typeBar.nextElementSibling.classList.remove('iirose-emoji-category-content-wrap');
-    }
   }
 
   function ensureCategoryBar(emojiPage) {
@@ -359,7 +745,6 @@
 
     const bar = document.createElement('div');
     bar.className = 'iirose-emoji-category-bar';
-    bar.dataset.iiroseEmojiCategoryBar = '1';
     bar.hidden = true;
     emojiPage.appendChild(bar);
     return bar;
@@ -525,6 +910,7 @@
 
     const action = button.dataset.categoryMenuAction;
     const categoryId = categoryMenu.dataset.categoryId;
+    const state = loadState();
 
     if (action === 'export') {
       closeCategoryMenu();
@@ -532,8 +918,21 @@
       return true;
     }
 
+    if (action === 'rename') {
+      const category = state.categories.find((item) => item.id === categoryId);
+      closeCategoryMenu();
+      if (!category) return true;
+
+      showTextDialog({
+        title: '重命名分类',
+        value: category.name,
+        confirmText: '确定',
+        onConfirm: (name) => renameCategory(category.id, name),
+      });
+      return true;
+    }
+
     if (action === 'delete') {
-      const state = loadState();
       const category = state.categories.find((item) => item.id === categoryId);
       closeCategoryMenu();
       if (category) {
@@ -554,13 +953,13 @@
   function handleShareMenuClick(event) {
     if (!shareMenu) return false;
 
-    const button = event.target.closest && event.target.closest('.iirose-emoji-share-menu button');
-    if (!button) return shareMenu.contains(event.target);
+    const item = event.target.closest && event.target.closest('.iirose-emoji-share-menu-item[data-share-menu-action]');
+    if (!item) return shareMenu.contains(event.target);
 
     event.preventDefault();
     event.stopPropagation();
 
-    const action = button.dataset.shareMenuAction;
+    const action = item.dataset.shareMenuAction;
     closeShareMenu();
 
     if (action === 'sync') {
@@ -569,12 +968,22 @@
     }
 
     if (action === 'market') {
-      showMarketDialog();
+      showMarketPanel();
       return true;
     }
 
     if (action === 'export') {
       showExportPickerDialog();
+      return true;
+    }
+
+    if (action === 'direct-share') {
+      showDirectSharePickerDialog();
+      return true;
+    }
+
+    if (action === 'toggle-direct-share-receive') {
+      toggleDirectShareReceiveAllowed();
       return true;
     }
 
@@ -817,6 +1226,13 @@
     exportButton.textContent = '导出分类';
     menu.appendChild(exportButton);
 
+    const renameButton = document.createElement('button');
+    renameButton.type = 'button';
+    renameButton.className = 'iirose-emoji-category-menu-button';
+    renameButton.dataset.categoryMenuAction = 'rename';
+    renameButton.textContent = '重命名';
+    menu.appendChild(renameButton);
+
     const deleteButton = document.createElement('button');
     deleteButton.type = 'button';
     deleteButton.className = 'iirose-emoji-category-menu-button iirose-emoji-category-menu-button--danger';
@@ -863,46 +1279,85 @@
     closeShareMenu();
 
     const root = document.createElement('div');
-    root.className = 'iirose-emoji-share-menu';
+    root.className = 'iirose-emoji-share-menu fullBox';
 
     const panel = document.createElement('div');
-    panel.className = 'iirose-emoji-share-menu-panel';
+    panel.className = 'iirose-emoji-share-menu-panel textColor';
     root.appendChild(panel);
 
     const header = document.createElement('div');
     header.className = 'iirose-emoji-share-menu-header';
-    header.textContent = '分类与市场';
+    header.addEventListener('click', (event) => event.stopPropagation());
+    const headerMark = document.createElement('div');
+    headerMark.className = 'iirose-emoji-share-menu-header-mark mdi-tag-text-outline';
+    header.appendChild(headerMark);
+    const headerText = document.createElement('div');
+    headerText.className = 'iirose-emoji-share-menu-header-text';
+    headerText.textContent = '分类与市场';
+    header.appendChild(headerText);
     panel.appendChild(header);
 
     panel.appendChild(createShareMenuButton('表情市场', 'market', 'mdi-store'));
     panel.appendChild(createShareMenuButton('同步', 'sync', 'mdi-sync'));
+    panel.appendChild(createShareMenuButton('发给用户', 'direct-share', 'mdi-send'));
+    panel.appendChild(createShareMenuButton('接收分享：' + (isDirectShareReceiveAllowed() ? '开' : '关'), 'toggle-direct-share-receive', isDirectShareReceiveAllowed() ? 'mdi-bell-ring' : 'mdi-bell-off'));
     panel.appendChild(createShareMenuButton('导出分类', 'export', 'mdi-content-copy'));
     panel.appendChild(createShareMenuButton('导入分类', 'import', 'mdi-card-text-outline'));
 
     root.addEventListener('click', (event) => {
       if (event.target === root) closeShareMenu();
     });
+    panel.addEventListener('click', (event) => event.stopPropagation());
 
     document.body.appendChild(root);
     shareMenu = root;
+    applyShareMenuTheme(root);
     positionShareMenu(root);
     window.setTimeout(() => positionShareMenu(root), 80);
   }
 
-  function createShareMenuButton(text, action, iconClass) {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'iirose-emoji-share-menu-item';
-    button.dataset.shareMenuAction = action;
+  function applyShareMenuTheme(root) {
+    const panel = root && root.querySelector('.iirose-emoji-share-menu-panel');
+    if (!panel || !window.getComputedStyle) return;
 
-    const icon = document.createElement('span');
+    const theme = getOfficialSelectHolderTheme();
+    const lightTheme = theme.light;
+
+    root.style.setProperty('--iirose-emoji-share-panel-bg', theme.backgroundColor);
+    root.style.setProperty('--iirose-emoji-share-text-color', theme.color);
+    root.style.setProperty('--iirose-emoji-share-header-bg', lightTheme ? '#f0f0f0' : '#303030');
+    root.style.setProperty('--iirose-emoji-share-hover-bg', lightTheme ? 'rgba(0, 0, 0, 0.06)' : 'rgba(255, 255, 255, 0.08)');
+  }
+
+  function createShareMenuButton(text, action, iconClass) {
+    const button = document.createElement('div');
+    button.className = 'iirose-emoji-share-menu-item selectHolderBoxItem selectHolderBoxItemIcon';
+    button.dataset.shareMenuAction = action;
+    button.setAttribute('role', 'button');
+    button.tabIndex = 0;
+
+    const icon = document.createElement('div');
     icon.className = 'iirose-emoji-share-menu-icon ' + iconClass;
     button.appendChild(icon);
 
-    const label = document.createElement('span');
-    label.className = 'iirose-emoji-share-menu-label';
-    label.textContent = text;
-    button.appendChild(label);
+    button.appendChild(document.createTextNode(text));
+
+    const touch = document.createElement('div');
+    touch.className = 'iirose-emoji-share-menu-touch fullBox whoisTouch3';
+    button.appendChild(touch);
+
+    button.addEventListener('mouseenter', () => {
+      try {
+        if (window.Utils && window.Utils.Sound) window.Utils.Sound.play(0);
+      } catch (error) {
+        // Site sound helpers may be unavailable in preview or restricted contexts.
+      }
+    });
+    button.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      button.click();
+    });
 
     return button;
   }
@@ -1007,6 +1462,33 @@
     renderCategoryBar();
     applyCategoryFilter();
     return category;
+  }
+
+  function renameCategory(categoryId, rawName) {
+    const name = rawName && rawName.trim();
+    if (!name) {
+      showSyncToast('分类名称不能为空。', true);
+      return false;
+    }
+
+    const newName = name.slice(0, 18);
+    const state = loadState();
+    const category = state.categories.find((item) => item.id === categoryId);
+    if (!category) return false;
+
+    if (category.name === newName) return false;
+
+    const duplicated = state.categories.some((item) => item.id !== categoryId && item.name === newName);
+    if (duplicated) {
+      showSyncToast('已有同名分类。', true);
+      return false;
+    }
+
+    category.name = newName;
+    saveState(state);
+    renderCategoryBar();
+    applyCategoryFilter();
+    return true;
   }
 
   function deleteCategory(categoryId) {
@@ -1360,54 +1842,187 @@
     };
   }
 
-  function showMarketDialog() {
+  function showMarketPanel() {
     closeItemMenu();
     closeCategoryMenu();
     closeCategoryPickerMenu();
     closeShareMenu();
     closeDialog();
 
-    const dialog = createDialogShell({
-      title: '表情市场',
-      confirmText: '关闭',
-      rootClass: 'iirose-emoji-dialog--market',
-    });
+    const panel = ensureMarketPanel();
+    if (!panel) return;
+
+    const list = panel.querySelector('.iirose-emoji-market-list');
+    const status = panel.querySelector('.iirose-emoji-market-status');
+    const refreshButton = panel.querySelector('.iirose-emoji-market-refresh');
+
+    panel.style.display = 'block';
+    applyMarketPanelTheme(panel);
+    panel.setAttribute('aria-hidden', 'false');
+    try {
+      panel.focus({ preventScroll: true });
+    } catch (error) {
+      panel.focus();
+    }
+    // Force the initial transform to apply before opening.
+    panel.offsetWidth;
+    panel.classList.add('iirose-emoji-market-holder--open');
+
+    loadMarketIndexInto(list, status, refreshButton);
+  }
+
+  function ensureMarketPanel() {
+    const parent = getMarketPanelParent();
+    if (!parent) return null;
+
+    if (marketPanel && marketPanel.parentNode !== parent) {
+      parent.appendChild(marketPanel);
+      marketPanel.classList.toggle('iirose-emoji-market-holder--body', parent === document.body);
+    }
+
+    if (marketPanel) return marketPanel;
+
+    const holder = document.createElement('div');
+    holder.id = 'iiroseEmojiMarketHolder';
+    holder.className = 'panelHolderItem iirose-emoji-market-holder';
+    holder.classList.toggle('iirose-emoji-market-holder--body', parent === document.body);
+    holder.tabIndex = -1;
+    holder.style.display = 'none';
+    holder.style.zIndex = '10';
+    holder.style.transition = 'transform 0.25s';
+    holder.style.opacity = '1';
+    holder.setAttribute('aria-hidden', 'true');
+
+    const theme = document.createElement('style');
+    theme.type = 'text/css';
+    theme.textContent = '#iiroseEmojiMarketHolder .mainColor{color:#6589cc;}#iiroseEmojiMarketHolder .mainBg_color{background-color:#6589cc;}#iiroseEmojiMarketHolder .mainBg_color2{background-color:rgba(101,137,204,.5);}';
+    holder.appendChild(theme);
+
+    const bgIcon = document.createElement('div');
+    bgIcon.className = 'contentItemBgicon mdi-store mainColor textOverflowEllipsis';
+    bgIcon.style.opacity = '.8';
+    holder.appendChild(bgIcon);
+
+    const bgText = document.createElement('span');
+    bgText.className = 'contentItemBgiconText';
+    bgText.textContent = '表情市场';
+    bgIcon.appendChild(bgText);
+
+    const contentWrap = document.createElement('div');
+    contentWrap.className = 'contentItemContent';
+    contentWrap.style.top = '0px';
+    contentWrap.style.bottom = '0px';
+    holder.appendChild(contentWrap);
+
+    const content = document.createElement('div');
+    content.className = 'fullBox textColor iirose-emoji-market-page';
+    contentWrap.appendChild(content);
 
     const toolbar = document.createElement('div');
     toolbar.className = 'iirose-emoji-market-toolbar';
-    dialog.content.appendChild(toolbar);
+    content.appendChild(toolbar);
 
     const status = document.createElement('div');
     status.className = 'iirose-emoji-market-status';
     status.textContent = '正在读取市场目录...';
     toolbar.appendChild(status);
 
-    const refreshButton = document.createElement('button');
-    refreshButton.type = 'button';
-    refreshButton.className = 'iirose-emoji-market-refresh';
-    refreshButton.textContent = '刷新';
-    toolbar.appendChild(refreshButton);
-
     const list = document.createElement('div');
     list.className = 'iirose-emoji-market-list';
-    dialog.content.appendChild(list);
+    content.appendChild(list);
 
-    const load = () => loadMarketIndexInto(list, status, refreshButton);
-    refreshButton.addEventListener('click', load);
-    dialog.confirmButton.addEventListener('click', () => closeDialog());
-    load();
+    const buttonBar = document.createElement('div');
+    buttonBar.className = 'contentItemBtn';
+    holder.appendChild(buttonBar);
+
+    const returnButton = document.createElement('button');
+    returnButton.type = 'button';
+    returnButton.className = 'panelReturnBtn mainBg_color commonColor';
+    returnButton.innerHTML = '<span class="buttonIcon mdi-chevron-left"></span><span class="buttonText">返回</span>';
+    buttonBar.appendChild(returnButton);
+
+    const refreshButton = document.createElement('button');
+    refreshButton.type = 'button';
+    refreshButton.className = 'panelMainBtn mainBg_color commonColor iirose-emoji-market-refresh';
+    refreshButton.innerHTML = '<span class="buttonIcon mdi-refresh"></span><span class="buttonText">刷新</span>';
+    buttonBar.appendChild(refreshButton);
+
+    returnButton.addEventListener('click', hideMarketPanel);
+    refreshButton.addEventListener('click', () => loadMarketIndexInto(list, status, refreshButton));
+    holder.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        hideMarketPanel();
+      }
+    });
+
+    parent.appendChild(holder);
+    marketPanel = holder;
+    applyMarketPanelTheme(holder);
+    return holder;
+  }
+
+  function applyMarketPanelTheme(panel) {
+    const page = panel && panel.querySelector('.iirose-emoji-market-page');
+    if (!page || !window.getComputedStyle) return;
+
+    const theme = getOfficialSelectHolderTheme();
+    const lightTheme = theme.light;
+
+    panel.style.setProperty('--iirose-emoji-market-page-bg', theme.backgroundColor);
+    panel.style.setProperty('--iirose-emoji-market-page-color', theme.color);
+    panel.style.setProperty('--iirose-emoji-market-card-bg', lightTheme ? 'rgba(255, 255, 255, 0.58)' : 'rgba(255, 255, 255, 0.08)');
+    panel.style.setProperty('--iirose-emoji-market-card-shadow', lightTheme ? 'none' : '0 1px 0 rgba(255, 255, 255, 0.05), 0 8px 24px rgba(0, 0, 0, 0.18)');
+    panel.style.setProperty('--iirose-emoji-market-title-color', lightTheme ? '#2c2c2c' : 'rgba(255, 255, 255, 0.94)');
+    panel.style.setProperty('--iirose-emoji-market-text-color', lightTheme ? 'rgba(45, 45, 45, 0.86)' : 'rgba(238, 238, 238, 0.72)');
+    panel.style.setProperty('--iirose-emoji-market-muted-color', lightTheme ? 'rgba(60, 60, 60, 0.78)' : 'rgba(238, 238, 238, 0.72)');
+    panel.style.setProperty('--iirose-emoji-market-soft-bg', lightTheme ? 'rgba(120, 120, 120, 0.12)' : 'rgba(255, 255, 255, 0.12)');
+    panel.style.setProperty('--iirose-emoji-market-empty-bg', lightTheme ? 'rgba(255, 255, 255, 0.5)' : 'rgba(255, 255, 255, 0.08)');
+    panel.style.setProperty('--iirose-emoji-market-empty-color', lightTheme ? 'rgba(45, 45, 45, 0.78)' : 'rgba(238, 238, 238, 0.74)');
+    panel.style.setProperty('--iirose-emoji-market-tag-bg', lightTheme ? 'rgba(101, 137, 204, 0.14)' : 'rgba(101, 137, 204, 0.24)');
+    panel.style.setProperty('--iirose-emoji-market-tag-color', lightTheme ? '#4a69a8' : 'rgba(210, 224, 255, 0.92)');
+    panel.style.setProperty('--iirose-emoji-market-muted-tag-bg', lightTheme ? 'rgba(120, 120, 120, 0.12)' : 'rgba(255, 255, 255, 0.1)');
+    panel.style.setProperty('--iirose-emoji-market-muted-tag-color', lightTheme ? 'rgba(80, 80, 80, 0.7)' : 'rgba(238, 238, 238, 0.6)');
+  }
+
+  function getMarketPanelParent() {
+    const hidePanel = document.querySelector('#hidePanel');
+    if (hidePanel) {
+      const style = window.getComputedStyle ? window.getComputedStyle(hidePanel) : null;
+      const rect = hidePanel.getBoundingClientRect();
+      if (!style || (style.display !== 'none' && style.visibility !== 'hidden' && rect.width && rect.height)) {
+        return hidePanel;
+      }
+    }
+
+    return document.body || document.documentElement;
+  }
+
+  function hideMarketPanel() {
+    if (!marketPanel) return;
+
+    marketPanel.classList.remove('iirose-emoji-market-holder--open');
+    marketPanel.setAttribute('aria-hidden', 'true');
+    window.setTimeout(() => {
+      if (marketPanel && !marketPanel.classList.contains('iirose-emoji-market-holder--open')) {
+        marketPanel.style.display = 'none';
+      }
+    }, 260);
   }
 
   function loadMarketIndexInto(list, status, refreshButton) {
+    const requestSeq = ++marketLoadSeq;
     if (refreshButton) refreshButton.disabled = true;
     if (list) list.innerHTML = '';
     if (status) status.textContent = '正在读取市场目录...';
 
     fetchMarketIndex()
       .then((market) => {
+        if (requestSeq !== marketLoadSeq) return;
         renderMarketPackList(list, market.packs, status);
       })
       .catch((error) => {
+        if (requestSeq !== marketLoadSeq) return;
         if (status) status.textContent = error && error.message ? error.message : '读取市场目录失败。';
 
         if (list) {
@@ -1418,7 +2033,7 @@
         }
       })
       .finally(() => {
-        if (refreshButton) refreshButton.disabled = false;
+        if (requestSeq === marketLoadSeq && refreshButton) refreshButton.disabled = false;
       });
   }
 
@@ -1428,16 +2043,32 @@
   }
 
   function fetchJson(url) {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller
+      ? window.setTimeout(() => controller.abort(), MARKET_FETCH_TIMEOUT_MS)
+      : 0;
+
     return fetch(url, {
       method: 'GET',
       cache: 'no-store',
       credentials: 'omit',
-    }).then((response) => {
-      if (!response.ok) {
-        throw new Error('请求失败：' + response.status);
-      }
-      return response.json();
-    });
+      signal: controller ? controller.signal : undefined,
+    })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error('请求失败：' + response.status);
+        }
+        return response.json();
+      })
+      .catch((error) => {
+        if (error && error.name === 'AbortError') {
+          throw new Error('请求超时，请稍后重试。');
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (timer) window.clearTimeout(timer);
+      });
   }
 
   function sanitizeMarketIndex(parsed) {
@@ -1478,6 +2109,12 @@
         .slice(0, 8)
       : [];
     const cover = sanitizeHttpUrl(pack.cover);
+    const preview = Array.isArray(pack.preview)
+      ? pack.preview
+        .map(sanitizeHttpUrl)
+        .filter(Boolean)
+        .slice(0, 8)
+      : [];
     const url = sanitizeHttpUrl(pack.url);
     const count = Math.max(0, Number(pack.count) || 0);
 
@@ -1492,6 +2129,7 @@
       desc,
       tags,
       cover,
+      preview,
       count,
       url,
     };
@@ -1617,7 +2255,44 @@
       importMarketPack(pack, importButton, status);
     });
 
+    const preview = createMarketPreview(pack);
+    if (preview) card.appendChild(preview);
+
     return card;
+  }
+
+  function createMarketPreview(pack) {
+    const urls = [];
+    if (Array.isArray(pack.preview)) {
+      pack.preview.forEach((url) => {
+        if (url && url !== pack.cover && urls.indexOf(url) === -1) urls.push(url);
+      });
+    }
+
+    const visibleUrls = urls.slice(0, 6);
+    if (!visibleUrls.length) return null;
+
+    const preview = document.createElement('div');
+    preview.className = 'iirose-emoji-market-preview';
+
+    visibleUrls.forEach((url, index) => {
+      const img = document.createElement('img');
+      img.className = 'iirose-emoji-market-preview-img';
+      img.alt = pack.name + ' 预览 ' + (index + 1);
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.src = url;
+      preview.appendChild(img);
+    });
+
+    if (urls.length > visibleUrls.length) {
+      const more = document.createElement('div');
+      more.className = 'iirose-emoji-market-preview-more';
+      more.textContent = '+' + (urls.length - visibleUrls.length);
+      preview.appendChild(more);
+    }
+
+    return preview;
   }
 
   function importMarketPack(pack, button, status) {
@@ -1841,8 +2516,6 @@
   function createDialogShell(options) {
     const root = document.createElement('div');
     root.className = 'iirose-emoji-dialog';
-    // 在首次定位前就加上变体类，保证 positionDialog 量到的是最终面板宽度（市场弹窗更宽）。
-    if (options.rootClass) root.classList.add(options.rootClass);
 
     const panel = document.createElement('div');
     panel.className = 'iirose-emoji-dialog-panel';
@@ -1915,10 +2588,6 @@
     if (shareMenu) positionShareMenu(shareMenu);
   }
 
-  function positionActiveDialog() {
-    positionFloatingPanels();
-  }
-
   function positionDialog(root) {
     const panel = root && root.querySelector('.iirose-emoji-dialog-panel');
     if (!panel) return;
@@ -1934,16 +2603,14 @@
   }
 
   function positionShareMenu(root) {
-    const panel = root && root.querySelector('.iirose-emoji-share-menu-panel');
-    if (!panel) return;
-
     const viewport = getViewportRect();
-    const panelRect = panel.getBoundingClientRect();
-    const { left, top } = placeFloatingPanel(viewport, panelRect, getEmojiPageAnchorRect());
+    const fixedOffset = getFixedLayerOffset();
     const padding = Math.min(24, Math.max(12, viewport.height * 0.025));
 
-    root.style.setProperty('--iirose-emoji-share-menu-left', left + 'px');
-    root.style.setProperty('--iirose-emoji-share-menu-top', top + 'px');
+    root.style.setProperty('--iirose-emoji-share-menu-root-left', viewport.left + 'px');
+    root.style.setProperty('--iirose-emoji-share-menu-root-top', (viewport.top - fixedOffset.top) + 'px');
+    root.style.setProperty('--iirose-emoji-share-menu-root-width', viewport.width + 'px');
+    root.style.setProperty('--iirose-emoji-share-menu-root-height', viewport.height + 'px');
     root.style.setProperty('--iirose-emoji-share-menu-max-height', Math.max(180, viewport.height - padding * 2) + 'px');
   }
 
@@ -1962,6 +2629,14 @@
     return {
       left: clamp(preferredLeft, viewport.left + padding, viewport.left + viewport.width - panelRect.width - padding),
       top: clamp(preferredTop, viewport.top + padding, viewport.top + viewport.height - panelRect.height - padding),
+    };
+  }
+
+  function getFixedLayerOffset() {
+    const bodyRect = document.body && document.body.getBoundingClientRect();
+    return {
+      left: bodyRect ? bodyRect.left : 0,
+      top: bodyRect ? bodyRect.top : 0,
     };
   }
 
@@ -2054,24 +2729,6 @@
     });
   }
 
-  function pruneCategories() {
-    const existingUrls = new Set(getCustomEmojiItems().map(getEmojiItemUrl).filter(Boolean));
-    if (!existingUrls.size) return;
-
-    const state = loadState();
-    let changed = false;
-
-    state.categories.forEach((category) => {
-      const nextItems = category.items.filter((url) => existingUrls.has(url));
-      if (nextItems.length !== category.items.length) {
-        category.items = nextItems;
-        changed = true;
-      }
-    });
-
-    if (changed) saveState(state);
-  }
-
   function getCustomEmojiItems() {
     return Array.from(document.querySelectorAll(CUSTOM_EMOJI_BOX_SELECTOR + ' .faceHolderBoxChildItem[c]'))
       .filter((item) => getEmojiItemUrl(item));
@@ -2126,7 +2783,6 @@
     item.dataset.iiroseExtraEmoji = '1';
     item.setAttribute('c', normalizedUrl);
     item.classList.remove('iirose-emoji-category-hidden');
-    item.removeAttribute('data-probe-url');
 
     if (!item.getAttribute('onclick')) {
       item.setAttribute('onclick', 'Objs.faceHolder.function.event.call(this,2,event);');
@@ -2422,6 +3078,59 @@
     return Math.max(min, Math.min(max, value));
   }
 
+  function parseCssColor(value) {
+    if (!value) return null;
+    const match = String(value).match(/rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)/i);
+    if (!match) return null;
+    return {
+      r: Number(match[1]),
+      g: Number(match[2]),
+      b: Number(match[3]),
+      a: match[4] == null ? 1 : Number(match[4])
+    };
+  }
+
+  function getOfficialSelectHolderTheme() {
+    const fallback = {
+      backgroundColor: 'rgba(255, 255, 255, 0.8)',
+      color: 'rgba(0, 0, 0, 0.75)',
+      light: true
+    };
+    if (!window.getComputedStyle || !document.body) return fallback;
+
+    let probe = document.querySelector('#selectHolderBox');
+    let shouldRemove = false;
+    if (!probe) {
+      probe = document.createElement('div');
+      probe.id = 'selectHolderBox';
+      probe.className = 'textColor';
+      probe.style.cssText = 'position:absolute;left:-99999px;top:-99999px;width:1px;height:1px;overflow:hidden;pointer-events:none;';
+      document.body.appendChild(probe);
+      shouldRemove = true;
+    }
+
+    const style = window.getComputedStyle(probe);
+    const backgroundColor = style.backgroundColor || fallback.backgroundColor;
+    const color = style.color || fallback.color;
+    if (shouldRemove) probe.remove();
+
+    const bg = parseCssColor(backgroundColor);
+    const text = parseCssColor(color);
+    const light = bg && bg.a > 0
+      ? getColorLuminance(bg) > 0.5
+      : !(text && getColorLuminance(text) > 0.5);
+
+    return { backgroundColor, color, light };
+  }
+
+  function getColorLuminance(color) {
+    const convert = (channel) => {
+      const value = clamp(channel, 0, 255) / 255;
+      return value <= 0.03928 ? value / 12.92 : Math.pow((value + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * convert(color.r) + 0.7152 * convert(color.g) + 0.0722 * convert(color.b);
+  }
+
   function injectStyle() {
     let style = document.getElementById('iirose-emoji-categories-style');
 
@@ -2611,82 +3320,104 @@
 .iirose-emoji-share-menu {
   box-sizing: border-box !important;
   position: fixed !important;
-  inset: 0 !important;
+  left: var(--iirose-emoji-share-menu-root-left, 0) !important;
+  top: var(--iirose-emoji-share-menu-root-top, 0) !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: var(--iirose-emoji-share-menu-root-width, 100vw) !important;
+  height: var(--iirose-emoji-share-menu-root-height, 100vh) !important;
   z-index: 2147483647 !important;
-  display: block !important;
-  padding: 20px !important;
-  background: rgba(0, 0, 0, 0.68) !important;
-  color: rgba(255, 255, 255, 0.86) !important;
-  backdrop-filter: blur(2px);
-  -webkit-backdrop-filter: blur(2px);
+  display: flex !important;
+  justify-content: center !important;
+  align-items: center !important;
+  padding: 24px !important;
+  background: rgba(0, 0, 0, 0.7) !important;
 }
 
 .iirose-emoji-share-menu-panel {
   box-sizing: border-box !important;
-  position: fixed !important;
-  left: var(--iirose-emoji-share-menu-left, 50%) !important;
-  top: var(--iirose-emoji-share-menu-top, 50%) !important;
-  width: min(640px, calc(100vw - 40px)) !important;
-  max-height: min(520px, var(--iirose-emoji-share-menu-max-height, calc(100vh - 40px))) !important;
-  overflow-y: auto !important;
-  background: rgba(33, 33, 33, 0.92) !important;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.38) !important;
+  position: relative !important;
+  width: min(700px, calc(100vw - 48px)) !important;
+  max-height: min(100%, var(--iirose-emoji-share-menu-max-height, calc(100vh - 48px))) !important;
+  overflow: auto !important;
+  background-color: var(--iirose-emoji-share-panel-bg, rgba(255, 255, 255, 0.8)) !important;
+  color: var(--iirose-emoji-share-text-color, rgba(0, 0, 0, 0.75)) !important;
+  box-shadow: rgba(0, 0, 0, 0.12) 0 0 1px, rgba(0, 0, 0, 0.24) 0 1px 1px !important;
+  transition: transform 0.125s !important;
 }
 
 .iirose-emoji-share-menu-header {
   box-sizing: border-box !important;
-  height: 82px !important;
-  padding: 0 44px !important;
+  position: relative !important;
+  width: 100% !important;
+  padding: 32px 48px !important;
+  white-space: pre-wrap !important;
+  background-color: var(--iirose-emoji-share-header-bg, #f0f0f0) !important;
+  box-shadow: 0 0 1px rgba(0, 0, 0, 0.12), 0 1px 1px rgba(0, 0, 0, 0.24) !important;
+}
+
+.iirose-emoji-share-menu-header-mark {
+  position: absolute !important;
+  top: 0 !important;
+  right: 48px !important;
+  height: 100% !important;
   display: flex !important;
-  align-items: center !important;
-  background: rgba(48, 48, 48, 0.96) !important;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.28) !important;
-  color: rgba(255, 255, 255, 0.86) !important;
+  justify-content: center !important;
+  flex-direction: column !important;
+  font-family: md !important;
+  font-size: 56px !important;
+  color: inherit !important;
+  opacity: 0.1 !important;
+}
+
+.iirose-emoji-share-menu-header-text {
+  position: relative !important;
+  font-size: 18px !important;
   font-weight: bold !important;
-  font-size: 24px !important;
-  line-height: 32px !important;
+  line-height: 26px !important;
+  color: inherit !important;
 }
 
 .iirose-emoji-share-menu-item {
   box-sizing: border-box !important;
   position: relative !important;
-  display: flex !important;
-  align-items: center !important;
   width: 100% !important;
-  min-height: 92px !important;
+  min-height: 100px !important;
   margin: 0 !important;
-  padding: 24px 48px 24px 124px !important;
+  padding: 32px 48px 32px 124px !important;
   border: 0 !important;
   background: transparent !important;
-  color: rgba(255, 255, 255, 0.86) !important;
+  color: inherit !important;
   font-weight: bold !important;
   font-size: 24px !important;
-  line-height: 34px !important;
+  line-height: 36px !important;
   text-align: left !important;
+  white-space: pre-wrap !important;
   cursor: pointer !important;
+  outline: 0 !important;
 }
 
-.iirose-emoji-share-menu-item:hover {
-  background: rgba(255, 255, 255, 0.08) !important;
+.iirose-emoji-share-menu-item:hover,
+.iirose-emoji-share-menu-item:focus-visible {
+  background: var(--iirose-emoji-share-hover-bg, rgba(0, 0, 0, 0.06)) !important;
 }
 
 .iirose-emoji-share-menu-icon {
   position: absolute !important;
-  left: 44px !important;
-  top: 50% !important;
-  width: 44px !important;
-  height: 44px !important;
-  transform: translateY(-50%) !important;
+  left: 0 !important;
+  top: 0 !important;
+  width: 100px !important;
+  height: 100px !important;
   font-family: md !important;
-  font-size: 34px !important;
-  line-height: 44px !important;
+  font-size: 28px !important;
+  line-height: 100px !important;
   text-align: center !important;
-  opacity: 0.76 !important;
+  opacity: 0.7 !important;
 }
 
-.iirose-emoji-share-menu-label {
-  min-width: 0 !important;
-  overflow-wrap: anywhere !important;
+.iirose-emoji-share-menu-touch {
+  position: absolute !important;
+  inset: 0 !important;
 }
 
 .iirose-emoji-sync-toast {
@@ -2739,11 +3470,6 @@
   background: rgba(240, 240, 240, 0.58) !important;
   box-shadow: 0 10px 32px rgba(0, 0, 0, 0.2) !important;
   pointer-events: auto !important;
-}
-
-.iirose-emoji-dialog--market .iirose-emoji-dialog-panel {
-  width: min(840px, calc(100vw - 32px)) !important;
-  height: min(640px, calc(100vh - 40px)) !important;
 }
 
 .iirose-emoji-dialog-header {
@@ -2853,6 +3579,117 @@
   line-height: 30px !important;
 }
 
+#iiroseEmojiMarketHolder.iirose-emoji-market-holder {
+  box-sizing: border-box !important;
+  height: 100% !important;
+  width: 100% !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  overflow: hidden !important;
+  transform: translateX(10%) !important;
+  outline: 0 !important;
+}
+
+#iiroseEmojiMarketHolder.iirose-emoji-market-holder--body {
+  position: fixed !important;
+  z-index: 2147483646 !important;
+  height: 100vh !important;
+  width: 100vw !important;
+}
+
+#iiroseEmojiMarketHolder.iirose-emoji-market-holder--open {
+  transform: translateX(0) !important;
+}
+
+#iiroseEmojiMarketHolder .contentItemBgicon {
+  box-sizing: border-box !important;
+  position: absolute !important;
+  top: 0 !important;
+  left: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+  pointer-events: none !important;
+}
+
+#iiroseEmojiMarketHolder .contentItemContent {
+  box-sizing: border-box !important;
+  position: absolute !important;
+  left: 0 !important;
+  right: 0 !important;
+  top: 0 !important;
+  bottom: 0 !important;
+}
+
+#iiroseEmojiMarketHolder .iirose-emoji-market-page {
+  box-sizing: border-box !important;
+  position: absolute !important;
+  inset: 0 !important;
+  overflow: auto !important;
+  padding: 64px 14px 72px !important;
+  background-color: var(--iirose-emoji-market-page-bg, rgba(255, 255, 255, 0.8)) !important;
+  color: var(--iirose-emoji-market-page-color, rgba(0, 0, 0, 0.75)) !important;
+  transform-origin: left top !important;
+  overscroll-behavior: contain !important;
+}
+
+#iiroseEmojiMarketHolder .contentItemBtn {
+  box-sizing: border-box !important;
+  position: absolute !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  height: 48px !important;
+  display: grid !important;
+  grid-template-columns: 1fr 1fr !important;
+  opacity: 1 !important;
+}
+
+#iiroseEmojiMarketHolder .panelReturnBtn,
+#iiroseEmojiMarketHolder .panelMainBtn {
+  box-sizing: border-box !important;
+  width: 100% !important;
+  height: 48px !important;
+  margin: 0 !important;
+  padding: 0 16px !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  font-weight: bold !important;
+  font-size: 18px !important;
+  line-height: 48px !important;
+  cursor: pointer !important;
+}
+
+#iiroseEmojiMarketHolder .panelReturnBtn .buttonIcon,
+#iiroseEmojiMarketHolder .panelMainBtn .buttonIcon {
+  display: inline-block !important;
+  margin-right: 10px !important;
+  font-family: md !important;
+  font-size: 28px !important;
+  line-height: 48px !important;
+  vertical-align: top !important;
+}
+
+#iiroseEmojiMarketHolder .panelReturnBtn .buttonText,
+#iiroseEmojiMarketHolder .panelMainBtn .buttonText {
+  display: inline-block !important;
+  line-height: 48px !important;
+  vertical-align: top !important;
+}
+
+#iiroseEmojiMarketHolder .iirose-emoji-market-toolbar {
+  min-height: 34px !important;
+  margin-bottom: 16px !important;
+  padding: 0 !important;
+}
+
+#iiroseEmojiMarketHolder .iirose-emoji-market-refresh {
+  min-height: 48px !important;
+  padding: 0 16px !important;
+  border-radius: 0 !important;
+  line-height: 48px !important;
+}
+
 .iirose-emoji-market-toolbar {
   box-sizing: border-box !important;
   display: flex !important;
@@ -2864,7 +3701,7 @@
 
 .iirose-emoji-market-status {
   min-width: 0 !important;
-  color: rgba(45, 45, 45, 0.78) !important;
+  color: var(--iirose-emoji-market-muted-color, rgba(45, 45, 45, 0.78)) !important;
   font-weight: bold !important;
   font-size: 14px !important;
   line-height: 20px !important;
@@ -2903,8 +3740,8 @@
   box-sizing: border-box !important;
   padding: 28px 18px !important;
   border-radius: 8px !important;
-  background: rgba(255, 255, 255, 0.5) !important;
-  color: rgba(45, 45, 45, 0.78) !important;
+  background: var(--iirose-emoji-market-empty-bg, rgba(255, 255, 255, 0.5)) !important;
+  color: var(--iirose-emoji-market-empty-color, rgba(45, 45, 45, 0.78)) !important;
   font-weight: bold !important;
   font-size: 15px !important;
   line-height: 22px !important;
@@ -2918,7 +3755,8 @@
   gap: 14px !important;
   padding: 12px !important;
   border-radius: 8px !important;
-  background: rgba(255, 255, 255, 0.58) !important;
+  background: var(--iirose-emoji-market-card-bg, rgba(255, 255, 255, 0.58)) !important;
+  box-shadow: var(--iirose-emoji-market-card-shadow, none) !important;
 }
 
 .iirose-emoji-market-cover {
@@ -2926,12 +3764,51 @@
   width: 124px !important;
   height: 124px !important;
   border-radius: 8px !important;
-  background: rgba(120, 120, 120, 0.12) !important;
+  background: var(--iirose-emoji-market-soft-bg, rgba(120, 120, 120, 0.12)) !important;
   object-fit: cover !important;
 }
 
 .iirose-emoji-market-cover[data-empty="1"] {
-  background: rgba(120, 120, 120, 0.16) !important;
+  background: var(--iirose-emoji-market-soft-bg, rgba(120, 120, 120, 0.16)) !important;
+}
+
+.iirose-emoji-market-preview {
+  box-sizing: border-box !important;
+  grid-column: 1 / -1 !important;
+  display: flex !important;
+  gap: 10px !important;
+  min-width: 0 !important;
+  padding-top: 2px !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  overscroll-behavior-x: contain !important;
+  scrollbar-width: thin !important;
+}
+
+.iirose-emoji-market-preview-img {
+  display: block !important;
+  flex: 0 0 auto !important;
+  width: 72px !important;
+  height: 72px !important;
+  border-radius: 8px !important;
+  background: var(--iirose-emoji-market-soft-bg, rgba(120, 120, 120, 0.12)) !important;
+  object-fit: cover !important;
+}
+
+.iirose-emoji-market-preview-more {
+  box-sizing: border-box !important;
+  flex: 0 0 auto !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 72px !important;
+  height: 72px !important;
+  border-radius: 8px !important;
+  background: rgba(0, 0, 0, 0.36) !important;
+  color: rgba(255, 255, 255, 0.92) !important;
+  font-weight: bold !important;
+  font-size: 16px !important;
+  line-height: 22px !important;
 }
 
 .iirose-emoji-market-body {
@@ -2952,12 +3829,12 @@
   width: 38px !important;
   height: 38px !important;
   border-radius: 999px !important;
-  background: rgba(120, 120, 120, 0.16) !important;
+  background: var(--iirose-emoji-market-soft-bg, rgba(120, 120, 120, 0.16)) !important;
   object-fit: cover !important;
 }
 
 .iirose-emoji-market-avatar[data-empty="1"] {
-  background: rgba(120, 120, 120, 0.2) !important;
+  background: var(--iirose-emoji-market-soft-bg, rgba(120, 120, 120, 0.2)) !important;
 }
 
 .iirose-emoji-market-author-text {
@@ -2965,14 +3842,14 @@
 }
 
 .iirose-emoji-market-title {
-  color: #2c2c2c !important;
+  color: var(--iirose-emoji-market-title-color, #2c2c2c) !important;
   font-weight: bold !important;
   font-size: 18px !important;
   line-height: 26px !important;
 }
 
 .iirose-emoji-market-meta {
-  color: rgba(60, 60, 60, 0.78) !important;
+  color: var(--iirose-emoji-market-muted-color, rgba(60, 60, 60, 0.78)) !important;
   font-weight: bold !important;
   font-size: 13px !important;
   line-height: 18px !important;
@@ -2989,7 +3866,7 @@
 }
 
 .iirose-emoji-market-desc {
-  color: rgba(45, 45, 45, 0.86) !important;
+  color: var(--iirose-emoji-market-text-color, rgba(45, 45, 45, 0.86)) !important;
   font-size: 14px !important;
   line-height: 21px !important;
   overflow-wrap: anywhere !important;
@@ -3006,16 +3883,16 @@
   min-height: 26px !important;
   padding: 4px 10px !important;
   border-radius: 999px !important;
-  background: rgba(101, 137, 204, 0.14) !important;
-  color: #4a69a8 !important;
+  background: var(--iirose-emoji-market-tag-bg, rgba(101, 137, 204, 0.14)) !important;
+  color: var(--iirose-emoji-market-tag-color, #4a69a8) !important;
   font-weight: bold !important;
   font-size: 12px !important;
   line-height: 18px !important;
 }
 
 .iirose-emoji-market-tag--muted {
-  background: rgba(120, 120, 120, 0.12) !important;
-  color: rgba(80, 80, 80, 0.7) !important;
+  background: var(--iirose-emoji-market-muted-tag-bg, rgba(120, 120, 120, 0.12)) !important;
+  color: var(--iirose-emoji-market-muted-tag-color, rgba(80, 80, 80, 0.7)) !important;
 }
 
 .iirose-emoji-market-actions {
@@ -3230,29 +4107,31 @@
   }
 
   .iirose-emoji-share-menu-header {
-    height: 64px !important;
-    padding: 0 26px !important;
-    font-size: 21px !important;
+    padding: 24px 28px !important;
+  }
+
+  .iirose-emoji-share-menu-header-mark {
+    right: 28px !important;
+    font-size: 48px !important;
+  }
+
+  .iirose-emoji-share-menu-header-text {
+    font-size: 17px !important;
+    line-height: 24px !important;
   }
 
   .iirose-emoji-share-menu-item {
-    min-height: 76px !important;
-    padding: 18px 26px 18px 86px !important;
-    font-size: 21px !important;
-    line-height: 30px !important;
+    min-height: 84px !important;
+    padding: 24px 28px 24px 92px !important;
+    font-size: 22px !important;
+    line-height: 32px !important;
   }
 
   .iirose-emoji-share-menu-icon {
-    left: 28px !important;
-    width: 36px !important;
-    height: 36px !important;
-    font-size: 30px !important;
-    line-height: 36px !important;
-  }
-
-  .iirose-emoji-dialog--market .iirose-emoji-dialog-panel {
-    width: calc(100vw - 20px) !important;
-    height: min(78vh, calc(100vh - 20px)) !important;
+    width: 84px !important;
+    height: 84px !important;
+    font-size: 28px !important;
+    line-height: 84px !important;
   }
 
   .iirose-emoji-market-toolbar {
@@ -3269,6 +4148,16 @@
   .iirose-emoji-market-cover {
     width: 96px !important;
     height: 96px !important;
+  }
+
+  .iirose-emoji-market-preview {
+    gap: 8px !important;
+  }
+
+  .iirose-emoji-market-preview-img,
+  .iirose-emoji-market-preview-more {
+    width: 64px !important;
+    height: 64px !important;
   }
 
   .iirose-emoji-market-title {
